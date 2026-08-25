@@ -28,6 +28,7 @@ export class Sky {
     this.skyDome = new THREE.Mesh(geo, this.skyMat);
     scene.add(this.skyDome);
     this.vertexCount = geo.attributes.position.count;
+    this._facs = [];
     this.buildGradient();
 
     // fog (replaces the engine's static one)
