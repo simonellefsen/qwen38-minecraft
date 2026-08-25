@@ -69,7 +69,8 @@ export class Engine {
     const c = document.createElement('canvas');
     c.width = c.height = 16;
     const ctx = c.getContext('2d', { willReadFrequently: true });
-    for (const [name, f] of Object.entries(this.uvMap)) {
+    for (const [name, f] of Object.entries(atlas.frames)) {
+      if (!f || !f.frame) continue;
       ctx.clearRect(0, 0, 16, 16);
       ctx.drawImage(img, f.frame.x, f.frame.y, 16, 16, 0, 0, 16, 16);
       const d = ctx.getImageData(0, 0, 16, 16).data;
