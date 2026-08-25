@@ -25,6 +25,8 @@ export class Engine {
     this.scene = new THREE.Scene();
     this.scene.background = new THREE.Color(0x9cd0f0);
     this.scene.fog = new THREE.Fog(0x9cd0f0, 40, 110);
+    // Flat ambient light only: per-face shading is already baked into vertex colors.
+    this.scene.add(new THREE.AmbientLight(0xffffff, 1.0));
 
     this.camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.08, FAR);
 

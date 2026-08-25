@@ -14,11 +14,12 @@ function renderHotbar() {
     el.className = 'slot' + (i === engine.selected ? ' selected' : '');
     const uv = engine.uvMap && engine.uvMap[def.icon];
     if (uv) {
-      const px = uv.u0 * engine.sheetW;
-      const py = uv.v0 * engine.sheetH;
+      const scale = 3; // 16px sprite -> 48px slot
+      const px = uv.u0 * engine.sheetW * scale;
+      const py = uv.v0 * engine.sheetH * scale;
       el.style.backgroundImage = 'url(./textures/atlas.png)';
       el.style.backgroundRepeat = 'no-repeat';
-      el.style.backgroundSize = `${engine.sheetW}px ${engine.sheetH}px`;
+      el.style.backgroundSize = `${engine.sheetW * scale}px ${engine.sheetH * scale}px`;
       el.style.backgroundPosition = `-${px}px -${py}px`;
     }
     el.title = `${def.name} (${i + 1})`;
