@@ -47,17 +47,29 @@ Open the dev URL, click **Play**, and you're in the world.
 ## Regenerating the texture atlas
 
 ```sh
-python3 tools/make_sprites.py   # draws the 14 source sprites (Pillow)
-TexturePacker \
-  --sheet public/textures/atlas.png \
-  --data  public/textures/atlas.json \
-  --format json --trim-sprite-names --trim-mode None \
-  --algorithm Basic \
-  public/textures/sprites
+python3 tools/make_sprites.py    # draws the 14 source sprites (Pillow)
+python3 tools/make_atlas.py      # packs them into atlas.png + atlas.json
 ```
+
+`make_atlas.py` writes a deterministic 16px grid atlas in the TexturePacker
+JSON format and verifies every cell is byte-identical to its source. (The
+original atlas was produced with TexturePacker 8.2, but that run shipped two
+corrupted cells — leaves/sand came out red — so the verified grid packer is
+now used. If you prefer TexturePacker, the engine only needs the same JSON
+`frames`/`meta.size` shape.)
 
 The game reads `atlas.json` at runtime, so sprite names/sizes in the atlas are
 data-driven — swap in your own 16×16 PNGs and it just works.
+
+## Game features
+
+- infinite chunked terrain (hills, beaches, sea, bedrock, trees)
+- true per-vertex ambient occlusion (Minecraft-style corner shading) under a
+  moving directional sun
+- day/night cycle with sun, moon, stars, drifting clouds, dusk sky tint
+- block break particles colored from the actual block texture
+- water, glass, leaves transparency; break a tree trunk and its canopy drops
+- block edits persist in `localStorage`
 
 ## Stack
 

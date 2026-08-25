@@ -1,12 +1,13 @@
 import * as THREE from 'three';
 import { World, CS } from './world.js';
 import { Player } from './player.js';
-import { BLOCKS, HOTBAR, WATER } from './blocks.js';
+import { BLOCKS, HOTBAR, WATER, isSolid } from './blocks.js';
 import { buildChunkGeometry, buildUVMap } from './mesher.js';
 import { raycast } from './raycast.js';
+import { Sky } from './sky.js';
+import { Particles } from './particles.js';
 
 const RENDER_RADIUS = 4;
-const FAR = 1500;
 
 export class Engine {
   constructor(container) {
@@ -23,12 +24,8 @@ export class Engine {
     this.renderer.domElement.addEventListener('contextmenu', (e) => e.preventDefault());
 
     this.scene = new THREE.Scene();
-    this.scene.background = new THREE.Color(0x9cd0f0);
-    this.scene.fog = new THREE.Fog(0x9cd0f0, 40, 110);
-    // Flat ambient light only: per-face shading is already baked into vertex colors.
-    this.scene.add(new THREE.AmbientLight(0xffffff, 1.0));
 
-    this.camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.08, FAR);
+    this.camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.08, 1500);
 
     this.world = new World();
     this.player = new Player(this.camera, this.world);
@@ -48,27 +45,55 @@ export class Engine {
   }
 
   async initTextures() {
-    const [jsonText, img] = await Promise.all([
-      fetch('./textures/atlas.json').then((r) => r.text()),
-      new THREE.TextureLoader().load('./textures/atlas.png'),
-    ]);
+    const jsonText = await fetch('./textures/atlas.json').then((r) => r.text());
     const atlas = JSON.parse(jsonText);
     const size = atlas.meta.size;
     this.uvMap = buildUVMap(atlas, size.w, size.h);
-    img.magFilter = THREE.NearestFilter;
-    img.minFilter = THREE.NearestFilter;
-    img.generateMipmaps = false;
-    img.colorSpace = THREE.SRGBColorSpace;
-    this.texture = img;
 
-    this.opaqueMat = new THREE.MeshLambertMaterial({ map: img, vertexColors: true });
+    const img = await new Promise((res, rej) => {
+      const i = new Image();
+      i.onload = () => res(i);
+      i.onerror = rej;
+      i.src = './textures/atlas.png';
+    });
+    const texture = new THREE.Texture(img);
+    texture.needsUpdate = true;
+    texture.magFilter = THREE.NearestFilter;
+    texture.minFilter = THREE.NearestFilter;
+    texture.generateMipmaps = false;
+    texture.colorSpace = THREE.SRGBColorSpace;
+    this.texture = texture;
+
+    // average color per sprite (for break particles)
+    this.blockColors = {};
+    const c = document.createElement('canvas');
+    c.width = c.height = 16;
+    const ctx = c.getContext('2d', { willReadFrequently: true });
+    for (const [name, f] of Object.entries(this.uvMap)) {
+      ctx.clearRect(0, 0, 16, 16);
+      ctx.drawImage(img, f.frame.x, f.frame.y, 16, 16, 0, 0, 16, 16);
+      const d = ctx.getImageData(0, 0, 16, 16).data;
+      let r = 0, g = 0, b = 0;
+      for (let i = 0; i < d.length; i += 4) {
+        r += d[i];
+        g += d[i + 1];
+        b += d[i + 2];
+      }
+      const n = d.length / 4;
+      this.blockColors[name] = new THREE.Color(r / n / 255, g / n / 255, b / n / 255);
+    }
+
+    this.opaqueMat = new THREE.MeshLambertMaterial({ map: texture, vertexColors: true });
     this.transMat = new THREE.MeshLambertMaterial({
-      map: img,
+      map: texture,
       vertexColors: true,
       transparent: true,
       side: THREE.DoubleSide,
       depthWrite: false,
     });
+
+    this.sky = new Sky(this.scene, this.camera);
+    this.particles = new Particles(this.scene);
   }
 
   chunkMeshKey(cx, cz) {
@@ -79,13 +104,11 @@ export class Engine {
     const key = this.chunkMeshKey(cx, cz);
     const existing = this.meshes.get(key);
     if (existing) {
-      if (existing.opaque) {
-        existing.opaque.geometry.dispose();
-        this.scene.remove(existing.opaque);
-      }
-      if (existing.trans) {
-        existing.trans.geometry.dispose();
-        this.scene.remove(existing.trans);
+      for (const m of [existing.opaque, existing.trans]) {
+        if (m) {
+          m.geometry.dispose();
+          this.scene.remove(m);
+        }
       }
     }
     if (!this.texture) return;
@@ -93,12 +116,10 @@ export class Engine {
     const entry = {};
     if (opaque) {
       entry.opaque = new THREE.Mesh(opaque, this.opaqueMat);
-      entry.opaque.matrixAutoUpdate = false;
       this.scene.add(entry.opaque);
     }
     if (trans) {
       entry.trans = new THREE.Mesh(trans, this.transMat);
-      entry.trans.matrixAutoUpdate = false;
       entry.trans.renderOrder = 1;
       this.scene.add(entry.trans);
     }
@@ -127,31 +148,18 @@ export class Engine {
         if (!this.meshes.has(this.chunkMeshKey(cx, cz))) needed.push([cx, cz]);
       }
     }
-    needed.sort(
-      (a, b) => a[0] * a[0] + a[1] * a[1] - (b[0] * b[0] + b[1] * b[1])
-    );
+    needed.sort((a, b) => a[0] * a[0] + a[1] * a[1] - (b[0] * b[0] + b[1] * b[1]));
     const budget = 1;
-    for (let i = 0; i < Math.min(needed.length, budget); i++) {
-      this.remeshChunk(needed[i][0], needed[i][1]);
-    }
-    const keep = new Set();
-    for (let dx = -RENDER_RADIUS; dx <= RENDER_RADIUS; dx++) {
-      for (let dz = -RENDER_RADIUS; dz <= RENDER_RADIUS; dz++) {
-        keep.add(this.chunkMeshKey(pcx + dx, pcz + dz));
-      }
-    }
+    for (let i = 0; i < Math.min(needed.length, budget); i++) this.remeshChunk(needed[i][0], needed[i][1]);
+
     for (const [key, entry] of this.meshes) {
-      if (keep.has(key)) continue;
       const [cx, cz] = key.split(',').map(Number);
-      const distC = Math.max(Math.abs(cx - pcx), Math.abs(cz - pcz));
-      if (distC <= RENDER_RADIUS + 1) continue;
-      if (entry.opaque) {
-        entry.opaque.geometry.dispose();
-        this.scene.remove(entry.opaque);
-      }
-      if (entry.trans) {
-        entry.trans.geometry.dispose();
-        this.scene.remove(entry.trans);
+      if (Math.max(Math.abs(cx - pcx), Math.abs(cz - pcz)) <= RENDER_RADIUS + 1) continue;
+      for (const m of [entry.opaque, entry.trans]) {
+        if (m) {
+          m.geometry.dispose();
+          this.scene.remove(m);
+        }
       }
       this.meshes.delete(key);
     }
@@ -163,7 +171,9 @@ export class Engine {
       if (!this.locked) canvas.requestPointerLock();
     });
     document.addEventListener('pointerlockchange', () => {
+      const was = this.locked;
       this.locked = document.pointerLockElement === canvas;
+      this.onLock && this.onLock(was, this.locked);
     });
     document.addEventListener('mousemove', (e) => {
       if (!this.locked) return;
@@ -175,6 +185,9 @@ export class Engine {
         const n = parseInt(e.code.slice(5), 10);
         if (n >= 1 && n <= HOTBAR.length) {
           this.selected = n - 1;
+          this.onSelect && this.onSelect(this.selected);
+        } else if (n === 0) {
+          this.selected = HOTBAR.length - 1;
           this.onSelect && this.onSelect(this.selected);
         }
       }
@@ -215,7 +228,25 @@ export class Engine {
   }
 
   breakBlock(x, y, z) {
-    if (y === 0) return; // keep the bedrock floor
+    if (y === 0) return; // bedrock floor
+    const id = this.world.get(x, y, z);
+    // breaking a logged trunk also drops its canopy (no floating leaves)
+    if (id === 6) {
+      for (let dy = -1; dy <= 6; dy++) {
+        for (let dx = -3; dx <= 3; dx++) {
+          for (let dz = -3; dz <= 3; dz++) {
+            const nx = x + dx, ny = y + dy, nz = z + dz;
+            if (this.world.get(nx, ny, nz) === 7) this.world.set(nx, ny, nz, 0);
+          }
+        }
+      }
+    }
+    const def = BLOCKS[id];
+    if (def && this.blockColors && this.particles) {
+      const name = def.side;
+      const col = this.blockColors[name] || this.blockColors[def.icon];
+      this.particles.burst(new THREE.Vector3(x + 0.5, y + 0.5, z + 0.5), col || new THREE.Color(0xbbbbbb));
+    }
     this.world.set(x, y, z, 0);
     this.affectedChunkUpdates(x, y, z);
   }
@@ -232,14 +263,7 @@ export class Engine {
   intersectsPlayer(x, y, z) {
     const p = this.player.pos;
     const hw = 0.3;
-    return (
-      x + 1 > p.x - hw &&
-      x < p.x + hw &&
-      z + 1 > p.z - hw &&
-      z < p.z + hw &&
-      y + 1 > p.y &&
-      y < p.y + 1.8
-    );
+    return x + 1 > p.x - hw && x < p.x + hw && z + 1 > p.z - hw && z < p.z + hw && y + 1 > p.y && y < p.y + 1.8;
   }
 
   affectedChunkUpdates(x, y, z) {
@@ -250,7 +274,6 @@ export class Engine {
     if (x % CS === CS - 1) updates.add(cx + 1 + ',' + cz);
     if (z % CS === 0) updates.add(cx + ',' + (cz - 1));
     if (z % CS === CS - 1) updates.add(cx + ',' + (cz + 1));
-    // trees can cross chunk borders: remesh a 3x3 neighborhood for safety at edits near trees
     for (const key of updates) {
       const [cxi, czi] = key.split(',').map(Number);
       this.remeshChunk(cxi, czi);
@@ -278,25 +301,23 @@ export class Engine {
   resetWorld() {
     this.world.resetEdits();
     for (const key of [...this.meshes.keys()]) {
-      this.remeshChunk(...key.split(',').map(Number));
+      const [cx, cz] = key.split(',').map(Number);
+      this.remeshChunk(cx, cz);
     }
   }
 
   frame(dt) {
+    const eyeInWater = this.player.eyesSubmerged;
+    if (this.sky && this.particles) {
+      this.sky.update(dt, eyeInWater ? 1 : 0);
+      this.particles.update(dt);
+    }
     if (this.locked) {
       this.player.move(dt);
       this.player.updateCamera();
       this.ensureChunks();
       this.updateHighlight();
-      const bg = this.player.eyesSubmerged ? 0x2d5f96 : 0x9cd0f0;
-      this.scene.background.setHex(bg);
-      this.scene.fog.color.setHex(bg);
     }
     this.renderer.render(this.scene, this.camera);
-  }
-
-  dispose() {
-    this.disposed = true;
-    window.removeEventListener('resize', this.resize.bind(this));
   }
 }

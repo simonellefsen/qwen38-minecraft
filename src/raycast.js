@@ -1,7 +1,8 @@
+import { isSolid } from './blocks.js';
 import { H } from './world.js';
 
-// Voxel traversal (Amanatides & Woo). Returns the cell hit plus the previous
-// cell (the neighbor the ray came from, useful for block placement).
+// Voxel traversal (Amanatides & Woo). Solid blocks only — water/air are
+// pass-through. Returns the hit cell plus the previous cell (for placement).
 export function raycast(world, origin, dir, maxDist = 6) {
   let x = Math.floor(origin.x);
   let y = Math.floor(origin.y);
@@ -24,7 +25,7 @@ export function raycast(world, origin, dir, maxDist = 6) {
 
   for (let i = 0; i < 512; i++) {
     const id = world.get(x, y, z);
-    if (id !== 0) {
+    if (id !== 0 && isSolid(world.get(x, y, z))) {
       return { x, y, z, px, py, pz, id, t };
     }
     px = x;

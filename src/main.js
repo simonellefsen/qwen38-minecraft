@@ -34,7 +34,9 @@ function renderHotbar() {
 function updateHud() {
   const p = engine.player.pos;
   const name = BLOCKS[HOTBAR[engine.selected]].name;
-  hudEl.textContent = `x ${p.x.toFixed(1)}  y ${p.y.toFixed(1)}  z ${p.z.toFixed(1)}   ·   ${name}   ·   seed 1337`;
+  const h = engine.sky ? Math.floor((engine.sky.t * 24 + 6) % 24) : null;
+  const clock = h !== null ? String(h).padStart(2, '0') + ':00' : '';
+  hudEl.textContent = `x ${p.x.toFixed(1)}  y ${p.y.toFixed(1)}  z ${p.z.toFixed(1)}   ·   slot ${engine.selected + 1} · ${name}   ·   ${clock}`;
 }
 
 async function boot() {

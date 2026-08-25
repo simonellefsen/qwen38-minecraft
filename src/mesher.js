@@ -2,13 +2,10 @@ import * as THREE from 'three';
 import { BLOCKS, isOpaque, WATER } from './blocks.js';
 import { H } from './world.js';
 
-// Face table. Each corner: [x, y, z, localU(0|1), localV(top=0|bottom=1)].
-// localV=0 is the sprite's TOP row (texture flipY=false).
+// Face table. Corner: [x, y, z, localU(0|1), localV(0|bottom)].
 const FACES = [
   {
-    // +x
     d: [1, 0, 0],
-    shade: 0.78,
     c: [
       [1, 1, 1, 1, 0],
       [1, 0, 1, 1, 1],
@@ -17,9 +14,7 @@ const FACES = [
     ],
   },
   {
-    // -x
     d: [-1, 0, 0],
-    shade: 0.78,
     c: [
       [0, 0, 0, 0, 1],
       [0, 1, 0, 0, 0],
@@ -28,9 +23,7 @@ const FACES = [
     ],
   },
   {
-    // +y (top)
     d: [0, 1, 0],
-    shade: 1.0,
     c: [
       [0, 1, 0, 0, 0],
       [0, 1, 1, 0, 1],
@@ -39,9 +32,7 @@ const FACES = [
     ],
   },
   {
-    // -y (bottom)
     d: [0, -1, 0],
-    shade: 0.55,
     c: [
       [0, 0, 0, 0, 0],
       [0, 0, 1, 0, 1],
@@ -50,9 +41,7 @@ const FACES = [
     ],
   },
   {
-    // +z
     d: [0, 0, 1],
-    shade: 0.66,
     c: [
       [0, 0, 1, 0, 1],
       [0, 1, 1, 0, 0],
@@ -61,9 +50,7 @@ const FACES = [
     ],
   },
   {
-    // -z
     d: [0, 0, -1],
-    shade: 0.66,
     c: [
       [1, 0, 0, 1, 1],
       [1, 1, 0, 1, 0],
@@ -73,7 +60,9 @@ const FACES = [
   },
 ];
 
-// UV layout computed from the TexturePacker JSON ("frames": name -> frame)
+// Minecraft-style ambient-occlusion factors per level (0..3).
+const AO_FACT = [0.45, 0.66, 0.85, 1.0];
+
 export function buildUVMap(atlasJSON, sheetW, sheetH) {
   const map = {};
   for (const [name, f] of Object.entries(atlasJSON.frames || {})) {
@@ -88,25 +77,43 @@ export function buildUVMap(atlasJSON, sheetW, sheetH) {
   return map;
 }
 
-function pushFace(out, gx, y, gz, face, spriteUV, shade, yOffset) {
+// Classic AO: two side probes + one corner probe per vertex.
+function vertexAO(world, gx, y, gz, face, p) {
+  const A = face.d[0] !== 0 ? 0 : face.d[1] !== 0 ? 1 : 2;
+  const [a1, a2] = A === 0 ? [1, 2] : A === 1 ? [0, 2] : [0, 1];
+  const s1 = [0, 0, 0];
+  const s2 = [0, 0, 0];
+  s1[a1] = p[a1] > 0.5 ? 1 : -1;
+  s2[a2] = p[a2] > 0.5 ? 1 : -1;
+  const corner = [0, 0, 0];
+  corner[a1] = s1[a1];
+  corner[a2] = s2[a2];
+  const o1 = isOpaque(world.get(gx + s1[0], y + s1[1], gz + s1[2])) ? 1 : 0;
+  const o2 = isOpaque(world.get(gx + s2[0], y + s2[1], gz + s2[2])) ? 1 : 0;
+  const oc = isOpaque(world.get(gx + corner[0], y + corner[1], gz + corner[2])) ? 1 : 0;
+  const level = o1 && o2 ? 0 : 3 - (o1 + o2 + oc);
+  return AO_FACT[level];
+}
+
+function pushFace(out, gx, y, gz, face, world, spriteUV, yOffset) {
   const base = out.positions.length / 3;
   for (const c of face.c) {
     out.positions.push(gx + c[0], y + (c[1] === 1 ? c[1] + yOffset : c[1]), gz + c[2]);
     out.normals.push(face.d[0], face.d[1], face.d[2]);
-    out.uvs.push(
-      spriteUV.u0 + c[3] * (spriteUV.u1 - spriteUV.u0),
-      spriteUV.v0 + c[4] * (spriteUV.v1 - spriteUV.v0)
-    );
-    out.colors.push(shade, shade, shade);
+    out.uvs.push(spriteUV.u0 + c[3] * (spriteUV.u1 - spriteUV.u0), spriteUV.v0 + c[4] * (spriteUV.v1 - spriteUV.v0));
+  }
+  for (const c of face.c) {
+    const f = vertexAO(world, gx, y, gz, face, c);
+    out.colors.push(f, f, f);
   }
   out.indices.push(base, base + 1, base + 2, base, base + 2, base + 3);
 }
 
-const empty = { positions: [], normals: [], uvs: [], colors: [], indices: [] };
+const newStream = () => ({ positions: [], normals: [], uvs: [], colors: [], indices: [] });
 
 export function buildChunkGeometry(world, cx, cz, uvMap) {
-  const opaque = { ...empty, positions: [], normals: [], uvs: [], colors: [], indices: [] };
-  const trans = { ...empty, positions: [], normals: [], uvs: [], colors: [], indices: [] };
+  const opaque = newStream();
+  const trans = newStream();
   const ox = cx * 16;
   const oz = cz * 16;
 
@@ -122,12 +129,11 @@ export function buildChunkGeometry(world, cx, cz, uvMap) {
         for (const face of FACES) {
           const n = world.get(gx + face.d[0], y + face.d[1], gz + face.d[2]);
           if (isOpaque(n) || n === id) continue;
-          const sprite =
-            face.d[1] === 1 ? def.top : face.d[1] === -1 ? def.bottom : def.side;
+          const sprite = face.d[1] === 1 ? def.top : face.d[1] === -1 ? def.bottom : def.side;
           const uv = uvMap[sprite];
           if (!uv) continue;
           const yOffset = id === WATER && face.d[1] === 1 ? -0.125 : 0;
-          pushFace(target, gx, y, gz, face, uv, face.shade, yOffset);
+          pushFace(target, gx, y, gz, face, world, uv, yOffset);
         }
       }
     }
